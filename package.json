@@ -2,7 +2,7 @@
   "name": "claude-input-enhancer",
   "displayName": "Claude Input Enhancer",
   "description": "Enhanced text input panel for Claude Code terminal",
-  "version": "0.0.2",
+  "version": "0.0.18",
   "engines": {
     "vscode": "^1.98.0"
   },
@@ -24,21 +24,24 @@
         "category": "Claude"
       }
     ],
-    "views": {
-      "terminal": [
+    "viewsContainers": {
+      "activitybar": [
         {
           "id": "claudeInputView",
-          "name": "Claude Input",
-          "when": "true"
+          "title": "Claude Input",
+          "icon": "resources/comment.svg"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "claudeInputView",
-        "contents": "Enhanced input for Claude Code\n[Open Input Panel](command:claude-input-enhancer.openInputPanel)"
-      }
-    ],
+    "views": {
+      "sidebar": [
+        {
+          "id": "claudeInputView",
+          "name": "Claude Input",
+          "type": "webview"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "claude-input-enhancer.openInputPanel",
@@ -57,7 +60,11 @@
         },
         "claudeInputEnhancer.panelPosition": {
           "type": "string",
-          "enum": ["sidebar", "bottom", "floating"],
+          "enum": [
+            "sidebar",
+            "bottom",
+            "floating"
+          ],
           "default": "sidebar",
           "description": "Position of the input panel"
         }
@@ -70,8 +77,9 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/vscode": "^1.98.0",
     "@types/node": "20.x",
+    "@types/vscode": "^1.98.0",
+    "@vscode/vsce": "^3.7.1",
     "typescript": "^5.4.5"
   }
 }
