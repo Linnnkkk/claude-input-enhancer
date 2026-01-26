@@ -58,51 +58,45 @@ export class FileSearchManager {
             return [];
         }
 
+        // If no query and in a folder, show folder contents
+        if (!query || query.length === 0) {
+            return this.getDirectoryContents(currentPath);
+        }
+
+        // With query, do recursive search from current path
+        return this.recursiveSearch(query, currentPath);
+    }
+
+    /**
+     * Get direct contents of a directory
+     */
+    private async getDirectoryContents(currentPath: string): Promise<FileSuggestion[]> {
         const searchPath = currentPath ? path.join(this.workspaceRoot, currentPath) : this.workspaceRoot;
 
         try {
-            // Read directory contents
             const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(searchPath));
-
             const suggestions: FileSuggestion[] = [];
 
             for (const [name, type] of entries) {
-                // Skip hidden files/folders (starting with .)
-                if (name.startsWith('.')) {
+                // Skip only specific hidden folders (not all)
+                if (name === '.git') {
+                    continue;
+                }
+
+                // Skip common exclude patterns
+                if (name === 'node_modules' || name === 'dist') {
                     continue;
                 }
 
                 const relativePath = currentPath ? path.join(currentPath, name) : name;
                 const fullPath = path.join(this.workspaceRoot, relativePath);
 
-                // Skip node_modules and other common exclude patterns
-                if (name === 'node_modules' || name === '.git' || name === 'out' || name === 'dist') {
-                    continue;
-                }
-
-                const suggestion: FileSuggestion = {
+                suggestions.push({
                     name,
                     fullPath,
                     relativePath,
                     type: type === vscode.FileType.Directory ? 'folder' : 'file',
                     icon: type === vscode.FileType.Directory ? '📁' : '📄'
-                };
-
-                suggestions.push(suggestion);
-            }
-
-            // Filter by query if provided
-            if (query && query.length > 0) {
-                const lowerQuery = query.toLowerCase();
-                return suggestions.filter(s => {
-                    const nameLower = s.name.toLowerCase();
-                    // Exact match
-                    if (nameLower === lowerQuery) return true;
-                    // Starts with
-                    if (nameLower.startsWith(lowerQuery)) return true;
-                    // Contains
-                    if (nameLower.includes(lowerQuery)) return true;
-                    return false;
                 });
             }
 
@@ -115,9 +109,83 @@ export class FileSearchManager {
             });
 
         } catch (error) {
-            console.error('Failed to search directory:', error);
+            console.error('Failed to get directory contents:', error);
             return [];
         }
+    }
+
+    /**
+     * Recursive search through subdirectories
+     */
+    private async recursiveSearch(query: string, currentPath: string): Promise<FileSuggestion[]> {
+        const searchPath = currentPath ? path.join(this.workspaceRoot, currentPath) : this.workspaceRoot;
+        const lowerQuery = query.toLowerCase();
+        const results: FileSuggestion[] = [];
+        const maxDepth = 5; // Limit recursion depth
+        const maxResults = 50; // Limit results
+
+        async function searchDir(dirPath: string, relativePath: string, depth: number): Promise<void> {
+            if (depth > maxDepth || results.length >= maxResults) {
+                return;
+            }
+
+            try {
+                const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dirPath));
+
+                for (const [name, type] of entries) {
+                    // Skip only specific hidden folders (not all)
+                    if (name === '.git') {
+                        continue;
+                    }
+
+                    // Skip common exclude patterns
+                    if (name === 'node_modules' || name === 'dist') {
+                        continue;
+                    }
+
+                    const itemRelativePath = relativePath ? path.join(relativePath, name) : name;
+                    const itemFullPath = path.join(dirPath, name);
+                    const nameLower = name.toLowerCase();
+
+                    // Check if matches query
+                    if (nameLower.includes(lowerQuery)) {
+                        results.push({
+                            name,
+                            fullPath: itemFullPath,
+                            relativePath: itemRelativePath,
+                            type: type === vscode.FileType.Directory ? 'folder' : 'file',
+                            icon: type === vscode.FileType.Directory ? '📁' : '📄'
+                        });
+
+                        if (results.length >= maxResults) {
+                            return;
+                        }
+                    }
+
+                    // Recursively search subdirectories
+                    if (type === vscode.FileType.Directory) {
+                        await searchDir(itemFullPath, itemRelativePath, depth + 1);
+                    }
+                }
+            } catch (error) {
+                // Ignore permission errors
+            }
+        }
+
+        await searchDir(searchPath, currentPath, 0);
+
+        // Sort: exact match first, then folders, then alphabetical
+        return results.sort((a, b) => {
+            const aExact = a.name.toLowerCase() === lowerQuery;
+            const bExact = b.name.toLowerCase() === lowerQuery;
+            if (aExact && !bExact) return -1;
+            if (!aExact && bExact) return 1;
+
+            if (a.type !== b.type) {
+                return a.type === 'folder' ? -1 : 1;
+            }
+            return a.name.localeCompare(b.name);
+        });
     }
 
     /**

@@ -59,7 +59,9 @@ export class ClaudeInputViewProvider implements vscode.WebviewViewProvider {
                 case 'getFileSuggestions':
                     const fileQuery = message.query || '';
                     const currentPath = message.currentPath || '';
+                    console.log('getFileSuggestions:', { fileQuery, currentPath });
                     this.fileSearchManager.search(fileQuery, currentPath).then(suggestions => {
+                        console.log('Search results:', suggestions.length);
                         webviewView.webview.postMessage({
                             command: 'fileSuggestionData',
                             data: suggestions
