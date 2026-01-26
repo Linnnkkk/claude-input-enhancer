@@ -40,10 +40,12 @@ export class TerminalBridge {
 
     /**
      * Send text to Claude Code terminal
+     * @param text The text to send
+     * @param autoEnter If true, automatically sends Enter key after text
      */
-    public sendToClaudeTerminal(text: string): boolean {
+    public sendToClaudeTerminal(text: string, autoEnter: boolean = false): boolean {
         const claudeTerminal = this.findClaudeTerminal();
-        
+
         if (!claudeTerminal) {
             vscode.window.showWarningMessage(
                 'No Claude Code terminal found. Please make sure Claude Code is running in a terminal.'
@@ -51,12 +53,20 @@ export class TerminalBridge {
             return false;
         }
 
-        // Send the text to the terminal
-        claudeTerminal.sendText(text, false); // false = don't add newline, let user control that
-        
+        // Send text without auto-enter
+        claudeTerminal.sendText(text, false);
+
+        // If autoEnter is requested, send Enter key separately with a small delay
+        // This helps ensure the terminal has processed the text before receiving Enter
+        if (autoEnter) {
+            setTimeout(() => {
+                claudeTerminal?.sendText('\n', false);
+            }, 50);
+        }
+
         // Focus the terminal so user can see the result
         claudeTerminal.show();
-        
+
         return true;
     }
 
