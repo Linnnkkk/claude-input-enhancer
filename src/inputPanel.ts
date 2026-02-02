@@ -137,6 +137,8 @@ export class ClaudeInputPanel {
                 /* Inline History Styles */
                 .history-section {
                     margin-bottom: 12px;
+                    max-height: 300px;
+                    overflow-y: auto;
                 }
 
                 .history-header {
@@ -159,8 +161,8 @@ export class ClaudeInputPanel {
 
                 .history-list {
                     display: flex;
-                    flex-wrap: wrap;
-                    gap: 6px;
+                    flex-direction: column;
+                    gap: 8px;
                 }
 
                 .history-item {
@@ -384,7 +386,7 @@ export class ClaudeInputPanel {
             <!-- Inline History Section -->
             <div class="history-section">
                 <div class="history-header">
-                    <span class="history-title">📜 Recent History</span>
+                    <span class="history-title">Recent Inputs</span>
                     <div class="history-actions">
                         <button id="clearHistoryButton" class="secondary-button" title="Clear all history">
                             Clear
@@ -392,7 +394,7 @@ export class ClaudeInputPanel {
                     </div>
                 </div>
                 <div id="historyList" class="history-list">
-                    <div class="history-empty">Loading history...</div>
+                    <div class="history-empty">No history yet. Send some messages!</div>
                 </div>
             </div>
 

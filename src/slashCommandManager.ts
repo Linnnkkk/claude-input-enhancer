@@ -106,49 +106,71 @@ function parseFrontmatter(content: string): Record<string, any> | null {
 /**
  * Discover user-invocable skills from SKILL.md files
  * These are custom skills added by the user
+ *
+ * Scans:
+ * 1. Global skills: ~/.claude/skills/
+ * 2. Project-specific skills: <workspace>/.claude/skills/
  */
-function discoverCustomSkills(claudePath: string): SlashCommand[] {
+function discoverCustomSkills(claudePath: string, workspaceRoots: string[] = []): SlashCommand[] {
     const commands: SlashCommand[] = [];
-    const skillsDir = path.join(claudePath, 'skills');
 
-    if (!fs.existsSync(skillsDir)) {
-        return commands;
-    }
-
-    const skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
-
-    for (const entry of skillEntries) {
-        if (!entry.isDirectory()) {
-            continue;
+    // Helper to scan a skills directory
+    function scanSkillsDirectory(skillsDir: string, category: string): void {
+        if (!fs.existsSync(skillsDir)) {
+            return;
         }
 
-        const skillPath = path.join(skillsDir, entry.name);
-        const skillMdPath = path.join(skillPath, 'SKILL.md');
+        const skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
 
-        if (fs.existsSync(skillMdPath)) {
-            try {
-                const content = fs.readFileSync(skillMdPath, 'utf-8');
-                const frontmatter = parseFrontmatter(content);
-
-                // Check if this is a user-invocable skill (has name in frontmatter)
-                if (frontmatter && frontmatter.name) {
-                    // Strip / prefix if present (we add it during insertion)
-                    let commandName = frontmatter.name;
-                    if (commandName.startsWith('/')) {
-                        commandName = commandName.substring(1);
-                    }
-
-                    commands.push({
-                        name: commandName,
-                        description: frontmatter.description || `Skill: ${commandName}`,
-                        category: 'Skills',
-                        source: 'skill'
-                    });
-                }
-            } catch (error) {
-                // Skip skills that can't be read
-                console.warn(`Failed to read skill: ${entry.name}`, error);
+        for (const entry of skillEntries) {
+            if (!entry.isDirectory()) {
+                continue;
             }
+
+            const skillPath = path.join(skillsDir, entry.name);
+            const skillMdPath = path.join(skillPath, 'SKILL.md');
+
+            if (fs.existsSync(skillMdPath)) {
+                try {
+                    const content = fs.readFileSync(skillMdPath, 'utf-8');
+                    const frontmatter = parseFrontmatter(content);
+
+                    // Check if this is a user-invocable skill (has name in frontmatter)
+                    if (frontmatter && frontmatter.name) {
+                        // Strip / prefix if present (we add it during insertion)
+                        let commandName = frontmatter.name;
+                        if (commandName.startsWith('/')) {
+                            commandName = commandName.substring(1);
+                        }
+
+                        commands.push({
+                            name: commandName,
+                            description: frontmatter.description || `Skill: ${commandName}`,
+                            category: category,
+                            source: 'skill'
+                        });
+                    }
+                } catch (error) {
+                    // Skip skills that can't be read
+                    console.warn(`Failed to read skill: ${entry.name}`, error);
+                }
+            }
+        }
+    }
+
+    // 1. Scan global skills directory
+    const globalSkillsDir = path.join(claudePath, 'skills');
+    scanSkillsDirectory(globalSkillsDir, 'Global Skills');
+
+    // 2. Scan project-specific skills directories (from workspace roots)
+    for (const workspaceRoot of workspaceRoots) {
+        const projectSkillsDir = path.join(workspaceRoot, '.claude', 'skills');
+
+        if (fs.existsSync(projectSkillsDir) && projectSkillsDir !== globalSkillsDir) {
+            // Get workspace folder name for category
+            const workspaceName = path.basename(workspaceRoot);
+            scanSkillsDirectory(projectSkillsDir, `Project: ${workspaceName}`);
+            console.log(`Scanned project skills: ${projectSkillsDir}`);
         }
     }
 
@@ -156,62 +178,151 @@ function discoverCustomSkills(claudePath: string): SlashCommand[] {
 }
 
 /**
- * Discover commands from plugins
+ * Discover commands from plugin commands/*.md files
+ *
+ * IMPORTANT: Only read from plugin root directories (where .claude-plugin/plugin.json exists)
+ * Do NOT recursively scan all subdirectories - this causes duplicates
+ *
+ * Command format:
+ * - Plugin skill: /plugin-name (from SKILL.md name field)
+ * - Plugin sub-command: /plugin-name:command-name (from commands/*.md files)
  */
 function discoverPluginCommands(claudePath: string): SlashCommand[] {
     const commands: SlashCommand[] = [];
-    const pluginsDir = path.join(claudePath, 'plugins', 'marketplaces');
+    const pluginsDir = path.join(claudePath, 'plugins');
 
     if (!fs.existsSync(pluginsDir)) {
         return commands;
     }
 
-    // Recursively find all SKILL.md files in plugins
-    function findSkillsInDir(dir: string, baseCategory: string = 'Plugins') {
+    // Find all plugin root directories (directories containing .claude-plugin/plugin.json)
+    function findPluginRoots(dir: string, baseCategory: string = 'Plugins'): string[] {
+        const pluginRoots: string[] = [];
+
+        if (!fs.existsSync(dir)) {
+            return pluginRoots;
+        }
+
         const entries = fs.readdirSync(dir, { withFileTypes: true });
 
         for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
 
             if (entry.isDirectory()) {
-                // Check if this directory has a SKILL.md
-                const skillMdPath = path.join(fullPath, 'SKILL.md');
-                if (fs.existsSync(skillMdPath)) {
-                    try {
-                        const content = fs.readFileSync(skillMdPath, 'utf-8');
-                        const frontmatter = parseFrontmatter(content);
-
-                        if (frontmatter && frontmatter.name) {
-                            // Strip / prefix if present (we add it during insertion)
-                            let commandName = frontmatter.name;
-                            if (commandName.startsWith('/')) {
-                                commandName = commandName.substring(1);
-                            }
-
-                            commands.push({
-                                name: commandName,
-                                description: frontmatter.description || `Plugin: ${commandName}`,
-                                category: baseCategory,
-                                source: 'plugin'
-                            });
-                        }
-                    } catch (error) {
-                        console.warn(`Failed to read plugin skill: ${entry.name}`, error);
-                    }
+                // Check if this is a plugin root (has .claude-plugin/plugin.json)
+                const pluginJsonPath = path.join(fullPath, '.claude-plugin', 'plugin.json');
+                if (fs.existsSync(pluginJsonPath)) {
+                    pluginRoots.push(fullPath);
                 } else {
                     // Recursively search subdirectories
-                    findSkillsInDir(fullPath, baseCategory);
+                    pluginRoots.push(...findPluginRoots(fullPath, baseCategory));
                 }
             }
         }
+
+        return pluginRoots;
     }
 
-    // Search in each marketplace
-    const marketplaces = fs.readdirSync(pluginsDir, { withFileTypes: true });
-    for (const marketplace of marketplaces) {
-        if (marketplace.isDirectory()) {
-            const marketplacePath = path.join(pluginsDir, marketplace.name);
-            findSkillsInDir(marketplacePath, `Plugins (${marketplace.name})`);
+    // Read commands from a single plugin root directory
+    function readPluginCommands(pluginRoot: string, baseCategory: string): void {
+        try {
+            // Read plugin name from plugin.json
+            const pluginJsonPath = path.join(pluginRoot, '.claude-plugin', 'plugin.json');
+            let pluginName = '';
+
+            if (fs.existsSync(pluginJsonPath)) {
+                try {
+                    const pluginJson = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'));
+                    pluginName = pluginJson.name || '';
+                } catch (e) {
+                    console.warn(`Failed to read plugin.json: ${pluginJsonPath}`);
+                }
+            }
+
+            if (!pluginName) {
+                return; // Skip if no plugin name
+            }
+
+            // Check for SKILL.md in skills/ subdirectory
+            const skillsDir = path.join(pluginRoot, 'skills');
+            if (fs.existsSync(skillsDir)) {
+                const skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
+                for (const skillEntry of skillEntries) {
+                    if (skillEntry.isDirectory()) {
+                        const skillMdPath = path.join(skillsDir, skillEntry.name, 'SKILL.md');
+                        if (fs.existsSync(skillMdPath)) {
+                            try {
+                                const content = fs.readFileSync(skillMdPath, 'utf-8');
+                                const frontmatter = parseFrontmatter(content);
+
+                                if (frontmatter && frontmatter.name) {
+                                    let skillName = frontmatter.name;
+                                    if (skillName.startsWith('/')) {
+                                        skillName = skillName.substring(1);
+                                    }
+
+                                    // Use skill name directly as command (e.g., /planning-with-files)
+                                    commands.push({
+                                        name: skillName,
+                                        description: frontmatter.description || `Skill: ${skillName}`,
+                                        category: baseCategory,
+                                        source: 'skill'
+                                    });
+                                }
+                            } catch (error) {
+                                console.warn(`Failed to read skill: ${skillMdPath}`, error);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check for commands/ subdirectory
+            const commandsDir = path.join(pluginRoot, 'commands');
+            if (fs.existsSync(commandsDir)) {
+                const commandFiles = fs.readdirSync(commandsDir);
+                for (const file of commandFiles) {
+                    if (file.endsWith('.md')) {
+                        const commandMdPath = path.join(commandsDir, file);
+                        try {
+                            const content = fs.readFileSync(commandMdPath, 'utf-8');
+                            const frontmatter = parseFrontmatter(content);
+
+                            // Command format: plugin-name:command-name
+                            const commandNameOnly = file.replace(/\.md$/, '');
+                            const fullCommandName = `${pluginName}:${commandNameOnly}`;
+
+                            commands.push({
+                                name: fullCommandName,
+                                description: frontmatter?.description || `Command: ${fullCommandName}`,
+                                category: baseCategory,
+                                source: 'command'
+                            });
+                        } catch (error) {
+                            console.warn(`Failed to read command: ${commandMdPath}`, error);
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn(`Failed to read plugin: ${pluginRoot}`, error);
+        }
+    }
+
+    // Search in marketplaces and cache directories
+    const subdirs = fs.readdirSync(pluginsDir, { withFileTypes: true });
+    for (const subdir of subdirs) {
+        if (subdir.isDirectory()) {
+            const subdirPath = path.join(pluginsDir, subdir.name);
+            const category = `Plugins (${subdir.name})`;
+
+            // Find all plugin roots in this subdirectory
+            const pluginRoots = findPluginRoots(subdirPath, category);
+
+            // Read commands from each plugin root
+            for (const pluginRoot of pluginRoots) {
+                readPluginCommands(pluginRoot, category);
+            }
         }
     }
 
@@ -230,7 +341,7 @@ function getClaudePath(): string {
  * Get all available commands (built-in + custom)
  * Deduplicates commands by name (first occurrence wins)
  */
-function getAllCommands(): SlashCommand[] {
+function getAllCommands(workspaceRoots: string[] = []): SlashCommand[] {
     const claudePath = getClaudePath();
     const commandMap = new Map<string, SlashCommand>();
 
@@ -246,8 +357,8 @@ function getAllCommands(): SlashCommand[] {
     // Start with built-in commands (highest priority)
     addCommands(BUILTIN_COMMANDS);
 
-    // Add custom skills
-    addCommands(discoverCustomSkills(claudePath));
+    // Add custom skills (including project-specific skills)
+    addCommands(discoverCustomSkills(claudePath, workspaceRoots));
 
     // Add plugin commands
     addCommands(discoverPluginCommands(claudePath));
@@ -258,10 +369,41 @@ function getAllCommands(): SlashCommand[] {
 export class SlashCommandManager {
     private commands: SlashCommand[] = [];
     private lastUpdateTime: number = 0;
-    private readonly CACHE_DURATION = 10000; // 10 seconds cache for custom commands
+    private readonly CACHE_DURATION = 2000; // 2 seconds cache for dynamic reloading
+    private workspaceRoots: string[] = [];
 
-    constructor() {
+    constructor(workspaceRoots: string[] = []) {
+        this.workspaceRoots = workspaceRoots;
         this.refreshCommands();
+        this.setupFileSystemWatcher();
+    }
+
+    /**
+     * Set up file system watcher for plugin changes
+     * This enables dynamic reloading when plugins are added/modified
+     */
+    private setupFileSystemWatcher(): void {
+        try {
+            const claudePath = getClaudePath();
+            const pluginsDir = path.join(claudePath, 'plugins');
+
+            if (!fs.existsSync(pluginsDir)) {
+                return;
+            }
+
+            // Watch for changes in plugins directory
+            fs.watch(pluginsDir, { recursive: true }, (eventType, filename) => {
+                if (filename && (filename.endsWith('.md') || filename.includes('commands'))) {
+                    console.log(`Plugin change detected: ${filename}, refreshing commands...`);
+                    this.refreshCommands();
+                }
+            });
+
+            console.log('File system watcher set up for plugin commands');
+        } catch (error) {
+            console.warn('Failed to set up file system watcher:', error);
+            // Non-fatal: commands will still refresh via cache duration
+        }
     }
 
     /**
@@ -269,8 +411,9 @@ export class SlashCommandManager {
      */
     private refreshCommands(): void {
         try {
-            this.commands = getAllCommands();
+            this.commands = getAllCommands(this.workspaceRoots);
             this.lastUpdateTime = Date.now();
+            console.log(`Commands refreshed: ${this.commands.length} total commands`);
         } catch (error) {
             console.error('Failed to refresh commands:', error);
             // Keep existing commands if refresh fails
@@ -278,10 +421,18 @@ export class SlashCommandManager {
     }
 
     /**
+     * Update workspace roots and refresh commands
+     */
+    public updateWorkspaceRoots(workspaceRoots: string[]): void {
+        this.workspaceRoots = workspaceRoots;
+        this.refreshCommands();
+    }
+
+    /**
      * Get all available commands
      */
     public getAllCommands(): SlashCommand[] {
-        // Check if we need to refresh custom commands
+        // Check if we need to refresh custom commands (reduced cache for dynamic loading)
         if (Date.now() - this.lastUpdateTime > this.CACHE_DURATION) {
             this.refreshCommands();
         }

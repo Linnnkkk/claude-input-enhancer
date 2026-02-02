@@ -11,9 +11,21 @@ export function activate(context: vscode.ExtensionContext) {
 
     const terminalBridge = new TerminalBridge();
     const historyManager = new HistoryManager(context);
-    const slashCommandManager = new SlashCommandManager();
+
+    // Get workspace roots for project-specific skill discovery
+    const workspaceRoots = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) || [];
+    const slashCommandManager = new SlashCommandManager(workspaceRoots);
+
     const fileSearchManager = new FileSearchManager();
     let inputPanel: ClaudeInputPanel | undefined;
+
+    // Watch for workspace folder changes to refresh project-specific skills
+    const workspaceChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        const newWorkspaceRoots = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) || [];
+        slashCommandManager.updateWorkspaceRoots(newWorkspaceRoots);
+        console.log('Workspace folders changed, refreshed slash commands');
+    });
+    context.subscriptions.push(workspaceChangeListener);
 
     // Register the terminal view provider
     const terminalViewProvider = new ClaudeInputViewProvider(

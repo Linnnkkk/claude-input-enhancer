@@ -130,6 +130,31 @@ claude-input-enhancer/
     └── comment.svg            # Extension icon
 ```
 
+## Version History
+
+### v0.0.18 (2025-01-26)
+- Remove placeholder text from input areas
+- Remove shortcut hint footer
+- Show full history without ellipsis
+- Reverse history order (newest at bottom)
+
+### v0.0.17 (2025-01-26)
+- Change History button to open Main Panel
+- Remove history popup functionality
+
+### v0.0.16 (2025-01-26)
+- Add Quick Start button for launching Claude
+- Auto-run `claude --dangerously-skip-permissions`
+
+### v0.0.15 (2025-01-26)
+- UI polish with loading states
+- Smooth transitions for suggestions
+- Enhanced button hover effects
+
+### v0.0.14 (2025-01-26)
+- Implement @ file/folder mentions
+- Workspace-limited file search
+- Folder navigation support
 
 ## License
 

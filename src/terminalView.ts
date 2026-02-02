@@ -348,7 +348,7 @@ export class ClaudeInputViewProvider implements vscode.WebviewViewProvider {
                     Clear
                 </button>
                 <button id="historyButton" class="secondary-button" title="View history">
-                    📜 History
+                    🏠 Home
                 </button>
                 <button id="quickStartButton" class="secondary-button" title="Quick start Claude">
                     🚀 Quick Start

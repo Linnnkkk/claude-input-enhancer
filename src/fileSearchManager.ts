@@ -1,6 +1,7 @@
 /**
  * File Search Manager
  * Handles file and folder search for @ mentions in the current workspace
+ * Optimized with workspace.findFiles API for fast file enumeration
  */
 
 import * as vscode from 'vscode';
@@ -21,14 +22,44 @@ export interface FolderContent {
 }
 
 /**
+ * Cached file data structure
+ */
+interface CachedFileData {
+    files: FileSuggestion[];
+    directoryMap: Map<string, FileSuggestion[]>; // path -> files in directory
+    timestamp: number;
+}
+
+/**
  * File Search Manager
  * Searches files and folders in the current workspace only
+ * Uses workspace.findFiles API for optimized performance
  */
 export class FileSearchManager {
     private workspaceRoot: string;
-    private fileCache: Map<string, FileSuggestion[]> = new Map();
-    private readonly CACHE_DURATION = 5000; // 5 seconds cache
-    private cacheTime: number = 0;
+    private cachedData: CachedFileData | null = null;
+    private readonly CACHE_TTL = 30000; // 30 seconds cache TTL
+    private readonly MAX_RESULTS = 50;
+    private cacheBuildPromise: Promise<void> | null = null;
+
+    // Common exclude patterns for workspace.findFiles
+    private readonly EXCLUDE_PATTERNS = [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/dist/**',
+        '**/build/**',
+        '**/.vscode-test/**',
+        '**/coverage/**',
+        '**/.next/**',
+        '**/out/**',
+        '**/.turbo/**',
+        '**/.venv/**',
+        '**/__pycache__/**',
+        '**/target/**',     // Rust
+        '**/vendor/**',     // PHP/Composer
+        '**/*.min.js',
+        '**/*.min.css',
+    ];
 
     constructor() {
         // Get the first workspace folder
@@ -48,6 +79,145 @@ export class FileSearchManager {
     }
 
     /**
+     * Build file cache using workspace.findFiles API
+     * Much faster than recursive directory scanning
+     */
+    private async buildCache(): Promise<void> {
+        if (!this.workspaceRoot) {
+            return;
+        }
+
+        // If a cache build is already in progress, wait for it
+        if (this.cacheBuildPromise) {
+            return this.cacheBuildPromise;
+        }
+
+        this.cacheBuildPromise = (async () => {
+            try {
+                // Use workspace.findFiles for fast file enumeration
+                // Pattern: **/* matches all files recursively
+                // Exclude: common patterns to reduce noise
+                const uris = await vscode.workspace.findFiles(
+                    '**/*',
+                    `{${this.EXCLUDE_PATTERNS.join(',')}}`,
+                    10000 // Maximum 10,000 files
+                );
+
+                const files: FileSuggestion[] = [];
+                const directoryMap = new Map<string, FileSuggestion[]>();
+
+                // Process each URI
+                for (const uri of uris) {
+                    const relativePath = path.relative(this.workspaceRoot, uri.fsPath);
+                    const parsedPath = path.parse(relativePath);
+                    const dir = parsedPath.dir;
+                    const name = parsedPath.base;
+                    const ext = parsedPath.ext;
+
+                    // Create file suggestion
+                    const suggestion: FileSuggestion = {
+                        name,
+                        fullPath: uri.fsPath,
+                        relativePath,
+                        type: 'file', // workspace.findFiles only returns files
+                        icon: this.getFileIcon(ext)
+                    };
+
+                    files.push(suggestion);
+
+                    // Add to directory map
+                    const dirKey = dir || '.';
+                    if (!directoryMap.has(dirKey)) {
+                        directoryMap.set(dirKey, []);
+                    }
+                    directoryMap.get(dirKey)!.push(suggestion);
+
+                    // Add parent directories to the directory map
+                    // This enables folder navigation
+                    const parts = dir.split(path.sep);
+                    for (let i = 0; i < parts.length; i++) {
+                        const folderPath = parts.slice(0, i + 1).join(path.sep);
+                        if (folderPath && !directoryMap.has(folderPath)) {
+                            // We'll add folder entries during filtering
+                        }
+                    }
+                }
+
+                // Cache the data
+                this.cachedData = {
+                    files,
+                    directoryMap,
+                    timestamp: Date.now()
+                };
+
+                console.log(`File cache built: ${files.length} files, ${directoryMap.size} directories`);
+            } catch (error) {
+                console.error('Failed to build file cache:', error);
+                this.cachedData = null;
+            } finally {
+                this.cacheBuildPromise = null;
+            }
+        })();
+
+        await this.cacheBuildPromise;
+    }
+
+    /**
+     * Get file icon based on extension
+     */
+    private getFileIcon(ext: string): string {
+        const iconMap: Record<string, string> = {
+            '.ts': '📘',
+            '.tsx': '⚛️',
+            '.js': '📜',
+            '.jsx': '⚛️',
+            '.py': '🐍',
+            '.rs': '🦀',
+            '.go': '🐹',
+            '.java': '☕',
+            '.cpp': '⚡',
+            '.c': '⚡',
+            '.h': '⚡',
+            '.css': '🎨',
+            '.scss': '🎨',
+            '.html': '🌐',
+            '.json': '📋',
+            '.md': '📝',
+            '.txt': '📄',
+            '.yaml': '⚙️',
+            '.yml': '⚙️',
+            '.xml': '📋',
+            '.svg': '🖼️',
+            '.png': '🖼️',
+            '.jpg': '🖼️',
+            '.jpeg': '🖼️',
+            '.gif': '🖼️',
+            '.pdf': '📕',
+        };
+        return iconMap[ext.toLowerCase()] || '📄';
+    }
+
+    /**
+     * Check if cache is valid (not expired)
+     */
+    private isCacheValid(): boolean {
+        if (!this.cachedData) {
+            return false;
+        }
+        const age = Date.now() - this.cachedData.timestamp;
+        return age < this.CACHE_TTL;
+    }
+
+    /**
+     * Ensure cache is built and valid
+     */
+    private async ensureCache(): Promise<void> {
+        if (!this.isCacheValid()) {
+            await this.buildCache();
+        }
+    }
+
+    /**
      * Search files and folders by query
      * @param query Search query (without @ prefix)
      * @param currentPath Current folder path (empty for workspace root)
@@ -58,19 +228,95 @@ export class FileSearchManager {
             return [];
         }
 
+        await this.ensureCache();
+
+        if (!this.cachedData) {
+            return [];
+        }
+
         // If no query and in a folder, show folder contents
         if (!query || query.length === 0) {
             return this.getDirectoryContents(currentPath);
         }
 
-        // With query, do recursive search from current path
-        return this.recursiveSearch(query, currentPath);
+        // With query, filter from cache
+        return this.filterFromCache(query, currentPath);
     }
 
     /**
-     * Get direct contents of a directory
+     * Get direct contents of a directory using cache
+     * Falls back to fs.readDirectory for folders not in cache
      */
     private async getDirectoryContents(currentPath: string): Promise<FileSuggestion[]> {
+        await this.ensureCache();
+
+        if (!this.cachedData) {
+            return [];
+        }
+
+        const dirKey = currentPath || '.';
+
+        // Check if we have cached data for this directory
+        const cachedFiles = this.cachedData.directoryMap.get(dirKey);
+        if (cachedFiles) {
+            // Get unique subdirectories from the cached files
+            const subdirs = new Set<string>();
+
+            for (const file of this.cachedData.files) {
+                const filePath = file.relativePath;
+                const fileDir = path.dirname(filePath);
+
+                // Check if this file is in a subdirectory of currentPath
+                if (currentPath === '') {
+                    // At root, check for direct subdirectories
+                    const firstDir = filePath.split(path.sep)[0];
+                    if (firstDir && firstDir !== '.' && !firstDir.includes(path.sep)) {
+                        subdirs.add(firstDir);
+                    }
+                } else {
+                    // In a subdirectory, check for children
+                    if (fileDir.startsWith(currentPath + path.sep)) {
+                        const relativeToCurrent = fileDir.substring(currentPath.length + 1);
+                        const firstSubdir = relativeToCurrent.split(path.sep)[0];
+                        if (firstSubdir) {
+                            subdirs.add(path.join(currentPath, firstSubdir));
+                        }
+                    }
+                }
+            }
+
+            // Build result with folders first, then files
+            const results: FileSuggestion[] = [];
+
+            // Add folders
+            const sortedSubdirs = Array.from(subdirs).sort();
+            for (const subdir of sortedSubdirs) {
+                const name = path.basename(subdir);
+                results.push({
+                    name,
+                    fullPath: path.join(this.workspaceRoot, subdir),
+                    relativePath: subdir,
+                    type: 'folder',
+                    icon: '📁'
+                });
+            }
+
+            // Add files
+            const sortedFiles = [...cachedFiles].sort((a, b) => a.name.localeCompare(b.name));
+            results.push(...sortedFiles);
+
+            return results;
+        }
+
+        // Fallback to fs.readDirectory if not in cache
+        return this.getDirectoryContentsFs(currentPath);
+    }
+
+    /**
+     * Fallback: Get directory contents using fs.readDirectory
+     * Used when cache doesn't have the directory
+     */
+    private async getDirectoryContentsFs(currentPath: string): Promise<FileSuggestion[]> {
         const searchPath = currentPath ? path.join(this.workspaceRoot, currentPath) : this.workspaceRoot;
 
         try {
@@ -84,7 +330,10 @@ export class FileSearchManager {
                 }
 
                 // Skip common exclude patterns
-                if (name === 'node_modules' || name === 'dist') {
+                if (this.EXCLUDE_PATTERNS.some(pattern => {
+                    const patternWithoutGlob = pattern.replace(/\*\*/g, '').replace(/\*/g, '');
+                    return name.includes(patternWithoutGlob.replace(/\//g, ''));
+                })) {
                     continue;
                 }
 
@@ -96,7 +345,7 @@ export class FileSearchManager {
                     fullPath,
                     relativePath,
                     type: type === vscode.FileType.Directory ? 'folder' : 'file',
-                    icon: type === vscode.FileType.Directory ? '📁' : '📄'
+                    icon: type === vscode.FileType.Directory ? '📁' : this.getFileIcon(path.extname(name))
                 });
             }
 
@@ -115,64 +364,86 @@ export class FileSearchManager {
     }
 
     /**
-     * Recursive search through subdirectories
+     * Filter files from cache by query
+     * Fast client-side filtering - no additional API calls
      */
-    private async recursiveSearch(query: string, currentPath: string): Promise<FileSuggestion[]> {
-        const searchPath = currentPath ? path.join(this.workspaceRoot, currentPath) : this.workspaceRoot;
+    private filterFromCache(query: string, currentPath: string): FileSuggestion[] {
+        if (!this.cachedData) {
+            return [];
+        }
+
         const lowerQuery = query.toLowerCase();
         const results: FileSuggestion[] = [];
-        const maxDepth = 5; // Limit recursion depth
-        const maxResults = 50; // Limit results
+        const seenDirs = new Set<string>(); // Track unique directories
 
-        async function searchDir(dirPath: string, relativePath: string, depth: number): Promise<void> {
-            if (depth > maxDepth || results.length >= maxResults) {
-                return;
+        // Filter files that match the query
+        for (const file of this.cachedData.files) {
+            // If currentPath is specified, only search within that path
+            if (currentPath) {
+                if (!file.relativePath.startsWith(currentPath + path.sep) && file.relativePath !== currentPath) {
+                    continue;
+                }
             }
 
-            try {
-                const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dirPath));
+            const nameLower = file.name.toLowerCase();
+            const dirName = path.dirname(file.relativePath);
 
-                for (const [name, type] of entries) {
-                    // Skip only specific hidden folders (not all)
-                    if (name === '.git') {
-                        continue;
-                    }
+            // Check if file name matches
+            if (nameLower.includes(lowerQuery)) {
+                results.push(file);
+                continue;
+            }
 
-                    // Skip common exclude patterns
-                    if (name === 'node_modules' || name === 'dist') {
-                        continue;
-                    }
-
-                    const itemRelativePath = relativePath ? path.join(relativePath, name) : name;
-                    const itemFullPath = path.join(dirPath, name);
-                    const nameLower = name.toLowerCase();
-
-                    // Check if matches query
-                    if (nameLower.includes(lowerQuery)) {
-                        results.push({
-                            name,
-                            fullPath: itemFullPath,
-                            relativePath: itemRelativePath,
-                            type: type === vscode.FileType.Directory ? 'folder' : 'file',
-                            icon: type === vscode.FileType.Directory ? '📁' : '📄'
-                        });
-
-                        if (results.length >= maxResults) {
-                            return;
-                        }
-                    }
-
-                    // Recursively search subdirectories
-                    if (type === vscode.FileType.Directory) {
-                        await searchDir(itemFullPath, itemRelativePath, depth + 1);
-                    }
+            // Check if any directory in the path matches
+            const pathParts = file.relativePath.split(path.sep);
+            for (const part of pathParts) {
+                if (part.toLowerCase().includes(lowerQuery)) {
+                    results.push(file);
+                    break;
                 }
-            } catch (error) {
-                // Ignore permission errors
+            }
+
+            // Stop if we've reached max results
+            if (results.length >= this.MAX_RESULTS) {
+                break;
             }
         }
 
-        await searchDir(searchPath, currentPath, 0);
+        // Add matching folders (deduplicated)
+        if (this.cachedData) {
+            for (const file of this.cachedData.files) {
+                if (results.length >= this.MAX_RESULTS) {
+                    break;
+                }
+
+                // If currentPath is specified, only search within that path
+                if (currentPath) {
+                    if (!file.relativePath.startsWith(currentPath + path.sep) && file.relativePath !== currentPath) {
+                        continue;
+                    }
+                }
+
+                const pathParts = file.relativePath.split(path.sep);
+
+                // Check each directory in the path
+                for (let i = 0; i < pathParts.length - 1; i++) {
+                    const dirPart = pathParts[i];
+                    const dirPathSoFar = pathParts.slice(0, i + 1).join(path.sep);
+
+                    if (dirPart.toLowerCase().includes(lowerQuery) && !seenDirs.has(dirPathSoFar)) {
+                        seenDirs.add(dirPathSoFar);
+                        results.push({
+                            name: dirPart,
+                            fullPath: path.join(this.workspaceRoot, dirPathSoFar),
+                            relativePath: dirPathSoFar,
+                            type: 'folder',
+                            icon: '📁'
+                        });
+                        break;
+                    }
+                }
+            }
+        }
 
         // Sort: exact match first, then folders, then alphabetical
         return results.sort((a, b) => {
@@ -185,7 +456,7 @@ export class FileSearchManager {
                 return a.type === 'folder' ? -1 : 1;
             }
             return a.name.localeCompare(b.name);
-        });
+        }).slice(0, this.MAX_RESULTS);
     }
 
     /**
@@ -266,7 +537,30 @@ export class FileSearchManager {
             this.workspaceRoot = '';
         }
         // Clear cache
-        this.fileCache.clear();
-        this.cacheTime = 0;
+        this.cachedData = null;
+    }
+
+    /**
+     * Manually invalidate and rebuild the cache
+     * Useful when files are created/deleted externally
+     */
+    public async invalidateCache(): Promise<void> {
+        this.cachedData = null;
+        await this.ensureCache();
+    }
+
+    /**
+     * Get cache statistics for debugging
+     */
+    public getCacheStats(): { fileCount: number; dirCount: number; age: number; isValid: boolean } | null {
+        if (!this.cachedData) {
+            return null;
+        }
+        return {
+            fileCount: this.cachedData.files.length,
+            dirCount: this.cachedData.directoryMap.size,
+            age: Date.now() - this.cachedData.timestamp,
+            isValid: this.isCacheValid()
+        };
     }
 }
