@@ -2,7 +2,7 @@
   "name": "claude-input-enhancer",
   "displayName": "Claude Input Enhancer",
   "description": "Enhanced text input panel for Claude Code terminal",
-  "version": "0.0.28",
+  "version": "0.0.32",
   "engines": {
     "vscode": "^1.98.0"
   },

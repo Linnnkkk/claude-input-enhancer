@@ -85,6 +85,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push({
         dispose() {
             inputPanel?.dispose();
+            fileSearchManager.dispose();
         }
     });
 }

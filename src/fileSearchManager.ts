@@ -40,7 +40,10 @@ export class FileSearchManager {
     private cachedData: CachedFileData | null = null;
     private readonly CACHE_TTL = 30000; // 30 seconds cache TTL
     private readonly MAX_RESULTS = 50;
+    private readonly MAX_CACHE_FILES = 100000; // Increased from 10k to 100k
     private cacheBuildPromise: Promise<void> | null = null;
+    private fileSystemWatcher: vscode.FileSystemWatcher | null = null;
+    private debugOutputChannel: vscode.OutputChannel;
 
     // Common exclude patterns for workspace.findFiles
     private readonly EXCLUDE_PATTERNS = [
@@ -62,6 +65,9 @@ export class FileSearchManager {
     ];
 
     constructor() {
+        // Create output channel for debug logging
+        this.debugOutputChannel = vscode.window.createOutputChannel('Claude Input Enhancer Debug');
+
         // Get the first workspace folder
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (workspaceFolders && workspaceFolders.length > 0) {
@@ -69,6 +75,42 @@ export class FileSearchManager {
         } else {
             this.workspaceRoot = '';
         }
+
+        // Set up file system watcher for cache invalidation
+        this.setupFileSystemWatcher();
+    }
+
+    /**
+     * Set up file system watcher to detect changes and invalidate cache
+     */
+    private setupFileSystemWatcher(): void {
+        if (!this.workspaceRoot) {
+            return;
+        }
+
+        try {
+            // Watch for file changes in the workspace
+            this.fileSystemWatcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(vscode.Uri.file(this.workspaceRoot), '**/*')
+            );
+
+            // Invalidate cache on any file change
+            this.fileSystemWatcher.onDidCreate(() => this.invalidateCacheQuietly());
+            this.fileSystemWatcher.onDidDelete(() => this.invalidateCacheQuietly());
+            this.fileSystemWatcher.onDidChange(() => this.invalidateCacheQuietly());
+
+            console.log('File system watcher set up for cache invalidation');
+        } catch (error) {
+            console.warn('Failed to set up file system watcher:', error);
+        }
+    }
+
+    /**
+     * Invalidate cache without awaiting (fire and forget)
+     */
+    private invalidateCacheQuietly(): void {
+        this.cachedData = null;
+        console.log('Cache invalidated due to file system change');
     }
 
     /**
@@ -94,17 +136,21 @@ export class FileSearchManager {
 
         this.cacheBuildPromise = (async () => {
             try {
+                console.log('Building file cache...');
+                const startTime = Date.now();
+
                 // Use workspace.findFiles for fast file enumeration
                 // Pattern: **/* matches all files recursively
                 // Exclude: common patterns to reduce noise
                 const uris = await vscode.workspace.findFiles(
                     '**/*',
                     `{${this.EXCLUDE_PATTERNS.join(',')}}`,
-                    10000 // Maximum 10,000 files
+                    this.MAX_CACHE_FILES // Increased limit to 100,000 files
                 );
 
                 const files: FileSuggestion[] = [];
                 const directoryMap = new Map<string, FileSuggestion[]>();
+                const allFolders = new Set<string>(); // Track all unique folders
 
                 // Process each URI
                 for (const uri of uris) {
@@ -132,14 +178,24 @@ export class FileSearchManager {
                     }
                     directoryMap.get(dirKey)!.push(suggestion);
 
-                    // Add parent directories to the directory map
-                    // This enables folder navigation
-                    const parts = dir.split(path.sep);
-                    for (let i = 0; i < parts.length; i++) {
-                        const folderPath = parts.slice(0, i + 1).join(path.sep);
-                        if (folderPath && !directoryMap.has(folderPath)) {
-                            // We'll add folder entries during filtering
+                    // Track all folders in the path for better folder navigation
+                    if (dir) {
+                        allFolders.add(dir);
+                        // Also add parent folders
+                        const parts = dir.split(path.sep);
+                        for (let i = 0; i < parts.length; i++) {
+                            const folderPath = parts.slice(0, i + 1).join(path.sep);
+                            allFolders.add(folderPath);
                         }
+                    }
+                }
+
+                // Initialize directory map entries for all folders (even if empty)
+                // This ensures folders show up in navigation even if they have no files yet
+                // or if their files were beyond the cache limit
+                for (const folder of allFolders) {
+                    if (!directoryMap.has(folder)) {
+                        directoryMap.set(folder, []);
                     }
                 }
 
@@ -150,7 +206,13 @@ export class FileSearchManager {
                     timestamp: Date.now()
                 };
 
-                console.log(`File cache built: ${files.length} files, ${directoryMap.size} directories`);
+                const elapsed = Date.now() - startTime;
+                console.log(`File cache built: ${files.length} files, ${directoryMap.size} directories in ${elapsed}ms`);
+
+                // Warn if we hit the limit
+                if (files.length >= this.MAX_CACHE_FILES) {
+                    console.warn(`⚠️ File cache hit limit (${this.MAX_CACHE_FILES} files). Some files may not appear in search. Folder navigation will use lazy loading.`);
+                }
             } catch (error) {
                 console.error('Failed to build file cache:', error);
                 this.cachedData = null;
@@ -245,71 +307,105 @@ export class FileSearchManager {
 
     /**
      * Get direct contents of a directory using cache
-     * Falls back to fs.readDirectory for folders not in cache
+     * Uses hybrid approach: cache for speed, lazy loading for completeness
      */
     private async getDirectoryContents(currentPath: string): Promise<FileSuggestion[]> {
         await this.ensureCache();
 
         if (!this.cachedData) {
-            return [];
+            // Ultimate fallback if cache doesn't exist
+            return this.getDirectoryContentsFs(currentPath);
         }
 
         const dirKey = currentPath || '.';
 
         // Check if we have cached data for this directory
         const cachedFiles = this.cachedData.directoryMap.get(dirKey);
+
+        // Get unique subdirectories from the cached files
+        const subdirs = new Set<string>();
+        const filesInDir = new Set<string>();
+
+        // First, collect files that are directly in this directory
         if (cachedFiles) {
-            // Get unique subdirectories from the cached files
-            const subdirs = new Set<string>();
+            for (const file of cachedFiles) {
+                filesInDir.add(file.relativePath);
+            }
+        }
 
-            for (const file of this.cachedData.files) {
-                const filePath = file.relativePath;
-                const fileDir = path.dirname(filePath);
+        // Then, scan all files to find subdirectories
+        // IMPORTANT: Only add paths that are actually directories (contain files)
+        // Don't add paths that match file names
+        for (const file of this.cachedData.files) {
+            const filePath = file.relativePath;
+            const fileDir = path.dirname(filePath);
 
-                // Check if this file is in a subdirectory of currentPath
-                if (currentPath === '') {
-                    // At root, check for direct subdirectories
-                    const firstDir = filePath.split(path.sep)[0];
-                    if (firstDir && firstDir !== '.' && !firstDir.includes(path.sep)) {
+            // Check if this file is in a subdirectory of currentPath
+            if (currentPath === '') {
+                // At root, check for direct subdirectories
+                const pathParts = filePath.split(path.sep);
+                if (pathParts.length > 1) {
+                    // This file is in a subdirectory
+                    const firstDir = pathParts[0];
+                    if (firstDir && firstDir !== '.') {
                         subdirs.add(firstDir);
                     }
-                } else {
-                    // In a subdirectory, check for children
-                    if (fileDir.startsWith(currentPath + path.sep)) {
-                        const relativeToCurrent = fileDir.substring(currentPath.length + 1);
-                        const firstSubdir = relativeToCurrent.split(path.sep)[0];
-                        if (firstSubdir) {
-                            subdirs.add(path.join(currentPath, firstSubdir));
-                        }
+                }
+                // If pathParts.length === 1, this file is in root directory
+                // Don't add it to subdirs (it's a file, not a folder)
+            } else {
+                // In a subdirectory, check for children
+                if (fileDir.startsWith(currentPath + path.sep)) {
+                    const relativeToCurrent = fileDir.substring(currentPath.length + 1);
+                    const firstSubdir = relativeToCurrent.split(path.sep)[0];
+                    if (firstSubdir) {
+                        subdirs.add(path.join(currentPath, firstSubdir));
                     }
                 }
             }
-
-            // Build result with folders first, then files
-            const results: FileSuggestion[] = [];
-
-            // Add folders
-            const sortedSubdirs = Array.from(subdirs).sort();
-            for (const subdir of sortedSubdirs) {
-                const name = path.basename(subdir);
-                results.push({
-                    name,
-                    fullPath: path.join(this.workspaceRoot, subdir),
-                    relativePath: subdir,
-                    type: 'folder',
-                    icon: '📁'
-                });
-            }
-
-            // Add files
-            const sortedFiles = [...cachedFiles].sort((a, b) => a.name.localeCompare(b.name));
-            results.push(...sortedFiles);
-
-            return results;
         }
 
-        // Fallback to fs.readDirectory if not in cache
-        return this.getDirectoryContentsFs(currentPath);
+        // Remove any subdirs that are actually files
+        // This prevents files from appearing as folders
+        for (const filePath of filesInDir) {
+            subdirs.delete(filePath);
+        }
+
+        // Check if directory might have more content (lazy load trigger)
+        // If we're near the cache limit, use lazy loading for better completeness
+        const shouldLazyLoad = this.cachedData.files.length >= (this.MAX_CACHE_FILES * 0.9);
+
+        if (shouldLazyLoad || (!cachedFiles && subdirs.size === 0)) {
+            // Use lazy loading for better completeness
+            this.debugOutputChannel.appendLine(`Using lazy loading for directory: ${currentPath || '(root)'}`);
+            return this.getDirectoryContentsFs(currentPath);
+        }
+
+        // Build result with folders first, then files
+        const results: FileSuggestion[] = [];
+
+        // Add folders
+        const sortedSubdirs = Array.from(subdirs).sort();
+        for (const subdir of sortedSubdirs) {
+            const name = path.basename(subdir);
+            results.push({
+                name,
+                fullPath: path.join(this.workspaceRoot, subdir),
+                relativePath: subdir,
+                type: 'folder',
+                icon: '📁'
+            });
+        }
+
+        // Add files (convert Set to Array and sort)
+        const sortedFiles = Array.from(filesInDir)
+            .map(relPath => this.cachedData!.files.find(f => f.relativePath === relPath))
+            .filter((f): f is FileSuggestion => f !== undefined)
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        results.push(...sortedFiles);
+
+        return results;
     }
 
     /**
@@ -372,11 +468,19 @@ export class FileSearchManager {
             return [];
         }
 
+        this.debugOutputChannel.appendLine('=== filterFromCache DEBUG START ===');
+        this.debugOutputChannel.appendLine(`Query: ${query}`);
+        this.debugOutputChannel.appendLine(`CurrentPath: ${currentPath}`);
+        this.debugOutputChannel.appendLine(`Total files in cache: ${this.cachedData.files.length}`);
+
         const lowerQuery = query.toLowerCase();
         const results: FileSuggestion[] = [];
-        const seenDirs = new Set<string>(); // Track unique directories
+        const seenDirs = new Set<string>(); // Track unique directories for folder results
+        const seenFilePaths = new Set<string>(); // Track unique file paths to avoid duplicates
 
         // Filter files that match the query
+        this.debugOutputChannel.appendLine('\n--- Loop 1: Adding Files ---');
+        let fileCount = 0;
         for (const file of this.cachedData.files) {
             // If currentPath is specified, only search within that path
             if (currentPath) {
@@ -386,20 +490,36 @@ export class FileSearchManager {
             }
 
             const nameLower = file.name.toLowerCase();
-            const dirName = path.dirname(file.relativePath);
+            let matched = false;
 
-            // Check if file name matches
+            // Check if file name matches (exact or contains)
             if (nameLower.includes(lowerQuery)) {
-                results.push(file);
-                continue;
+                if (!seenFilePaths.has(file.relativePath)) {
+                    seenFilePaths.add(file.relativePath);
+                    results.push(file);
+                    fileCount++;
+                    this.debugOutputChannel.appendLine(`✓ Added FILE: name="${file.name}" path="${file.relativePath}" type="${file.type}"`);
+                } else {
+                    this.debugOutputChannel.appendLine(`✗ Skipped duplicate FILE: path="${file.relativePath}"`);
+                }
+                matched = true;
             }
 
-            // Check if any directory in the path matches
-            const pathParts = file.relativePath.split(path.sep);
-            for (const part of pathParts) {
-                if (part.toLowerCase().includes(lowerQuery)) {
-                    results.push(file);
-                    break;
+            // If file name didn't match, check if any directory in the path matches
+            if (!matched) {
+                const pathParts = file.relativePath.split(path.sep);
+                for (const part of pathParts) {
+                    if (part.toLowerCase().includes(lowerQuery)) {
+                        if (!seenFilePaths.has(file.relativePath)) {
+                            seenFilePaths.add(file.relativePath);
+                            results.push(file);
+                            fileCount++;
+                            this.debugOutputChannel.appendLine(`✓ Added FILE (path match): name="${file.name}" path="${file.relativePath}" type="${file.type}"`);
+                        } else {
+                            this.debugOutputChannel.appendLine(`✗ Skipped duplicate FILE (path match): path="${file.relativePath}"`);
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -408,8 +528,12 @@ export class FileSearchManager {
                 break;
             }
         }
+        this.debugOutputChannel.appendLine(`Loop 1 complete: ${fileCount} files added`);
 
         // Add matching folders (deduplicated)
+        // Only add actual folders, not files
+        this.debugOutputChannel.appendLine('\n--- Loop 2: Adding Folders ---');
+        let folderCount = 0;
         if (this.cachedData) {
             for (const file of this.cachedData.files) {
                 if (results.length >= this.MAX_RESULTS) {
@@ -425,28 +549,44 @@ export class FileSearchManager {
 
                 const pathParts = file.relativePath.split(path.sep);
 
-                // Check each directory in the path
+                // Only check directories in the path (not the filename itself)
+                // Stop at pathParts.length - 1 to exclude the filename
                 for (let i = 0; i < pathParts.length - 1; i++) {
                     const dirPart = pathParts[i];
                     const dirPathSoFar = pathParts.slice(0, i + 1).join(path.sep);
 
-                    if (dirPart.toLowerCase().includes(lowerQuery) && !seenDirs.has(dirPathSoFar)) {
-                        seenDirs.add(dirPathSoFar);
-                        results.push({
-                            name: dirPart,
-                            fullPath: path.join(this.workspaceRoot, dirPathSoFar),
-                            relativePath: dirPathSoFar,
-                            type: 'folder',
-                            icon: '📁'
-                        });
-                        break;
+                    // Make sure this folder is not actually a file
+                    if (this.cachedData.directoryMap.has(dirPathSoFar)) {
+                        // This is a directory with files, not a file
+                        if (dirPart.toLowerCase().includes(lowerQuery) && !seenDirs.has(dirPathSoFar)) {
+                            seenDirs.add(dirPathSoFar);
+                            const folderSuggestion: FileSuggestion = {
+                                name: dirPart,
+                                fullPath: path.join(this.workspaceRoot, dirPathSoFar),
+                                relativePath: dirPathSoFar,
+                                type: 'folder',
+                                icon: '📁'
+                            };
+                            results.push(folderSuggestion);
+                            folderCount++;
+                            this.debugOutputChannel.appendLine(`✓ Added FOLDER: name="${dirPart}" path="${dirPathSoFar}" type="folder"`);
+                        } else if (dirPart.toLowerCase().includes(lowerQuery)) {
+                            this.debugOutputChannel.appendLine(`✗ Skipped duplicate FOLDER: path="${dirPathSoFar}"`);
+                        }
                     }
                 }
             }
         }
+        this.debugOutputChannel.appendLine(`Loop 2 complete: ${folderCount} folders added`);
+
+        this.debugOutputChannel.appendLine('\n--- Results Before Sorting ---');
+        this.debugOutputChannel.appendLine(`Total results: ${results.length}`);
+        results.forEach((item, index) => {
+            this.debugOutputChannel.appendLine(`  [${index}] name="${item.name}" path="${item.relativePath}" type="${item.type}"`);
+        });
 
         // Sort: exact match first, then folders, then alphabetical
-        return results.sort((a, b) => {
+        const sorted = results.sort((a, b) => {
             const aExact = a.name.toLowerCase() === lowerQuery;
             const bExact = b.name.toLowerCase() === lowerQuery;
             if (aExact && !bExact) return -1;
@@ -457,6 +597,16 @@ export class FileSearchManager {
             }
             return a.name.localeCompare(b.name);
         }).slice(0, this.MAX_RESULTS);
+
+        this.debugOutputChannel.appendLine('\n--- Results After Sorting ---');
+        this.debugOutputChannel.appendLine(`Total results (after limit): ${sorted.length}`);
+        sorted.forEach((item, index) => {
+            this.debugOutputChannel.appendLine(`  [${index}] name="${item.name}" path="${item.relativePath}" type="${item.type}"`);
+        });
+        this.debugOutputChannel.appendLine('=== filterFromCache DEBUG END ===\n');
+        this.debugOutputChannel.show(); // Automatically show the output panel
+
+        return sorted;
     }
 
     /**
@@ -530,13 +680,34 @@ export class FileSearchManager {
      * Refresh workspace root (call when workspace changes)
      */
     public refreshWorkspace(): void {
+        // Dispose old watcher
+        if (this.fileSystemWatcher) {
+            this.fileSystemWatcher.dispose();
+            this.fileSystemWatcher = null;
+        }
+
+        // Update workspace root
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (workspaceFolders && workspaceFolders.length > 0) {
             this.workspaceRoot = workspaceFolders[0].uri.fsPath;
         } else {
             this.workspaceRoot = '';
         }
-        // Clear cache
+
+        // Clear cache and set up new watcher
+        this.cachedData = null;
+        this.setupFileSystemWatcher();
+    }
+
+    /**
+     * Dispose resources
+     */
+    public dispose(): void {
+        if (this.fileSystemWatcher) {
+            this.fileSystemWatcher.dispose();
+            this.fileSystemWatcher = null;
+        }
+        this.debugOutputChannel.dispose();
         this.cachedData = null;
     }
 
