@@ -7,7 +7,6 @@ import { SlashCommandManager } from './slashCommandManager';
 import { FileSearchManager } from './fileSearchManager';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Claude Input Enhancer extension is now active');
 
     const terminalBridge = new TerminalBridge();
     const historyManager = new HistoryManager(context);
@@ -23,7 +22,6 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
         const newWorkspaceRoots = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) || [];
         slashCommandManager.updateWorkspaceRoots(newWorkspaceRoots);
-        console.log('Workspace folders changed, refreshed slash commands');
     });
     context.subscriptions.push(workspaceChangeListener);
 
@@ -135,5 +133,4 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function deactivate() {
-    console.log('Claude Input Enhancer extension deactivated');
 }

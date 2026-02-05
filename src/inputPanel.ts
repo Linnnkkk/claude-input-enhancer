@@ -955,7 +955,6 @@ export class ClaudeInputPanel {
                         case 'terminalInfo':
                             const info = message.data.join('\\\\n');
                             showStatus('Terminal Info:\\\\n' + info, 'info');
-                            console.log('Terminal Debug Info:', message.data);
                             break;
                     }
                 });

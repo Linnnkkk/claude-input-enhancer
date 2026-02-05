@@ -43,7 +43,6 @@ export class FileSearchManager {
     private readonly MAX_CACHE_FILES = 100000; // Increased from 10k to 100k
     private cacheBuildPromise: Promise<void> | null = null;
     private fileSystemWatcher: vscode.FileSystemWatcher | null = null;
-    private debugOutputChannel: vscode.OutputChannel;
 
     // Common exclude patterns for workspace.findFiles
     private readonly EXCLUDE_PATTERNS = [
@@ -65,9 +64,6 @@ export class FileSearchManager {
     ];
 
     constructor() {
-        // Create output channel for debug logging
-        this.debugOutputChannel = vscode.window.createOutputChannel('Claude Input Enhancer Debug');
-
         // Get the first workspace folder
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (workspaceFolders && workspaceFolders.length > 0) {
@@ -98,10 +94,7 @@ export class FileSearchManager {
             this.fileSystemWatcher.onDidCreate(() => this.invalidateCacheQuietly());
             this.fileSystemWatcher.onDidDelete(() => this.invalidateCacheQuietly());
             this.fileSystemWatcher.onDidChange(() => this.invalidateCacheQuietly());
-
-            console.log('File system watcher set up for cache invalidation');
         } catch (error) {
-            console.warn('Failed to set up file system watcher:', error);
         }
     }
 
@@ -110,7 +103,6 @@ export class FileSearchManager {
      */
     private invalidateCacheQuietly(): void {
         this.cachedData = null;
-        console.log('Cache invalidated due to file system change');
     }
 
     /**
@@ -136,7 +128,6 @@ export class FileSearchManager {
 
         this.cacheBuildPromise = (async () => {
             try {
-                console.log('Building file cache...');
                 const startTime = Date.now();
 
                 // Use workspace.findFiles for fast file enumeration
@@ -207,14 +198,7 @@ export class FileSearchManager {
                 };
 
                 const elapsed = Date.now() - startTime;
-                console.log(`File cache built: ${files.length} files, ${directoryMap.size} directories in ${elapsed}ms`);
-
-                // Warn if we hit the limit
-                if (files.length >= this.MAX_CACHE_FILES) {
-                    console.warn(`⚠️ File cache hit limit (${this.MAX_CACHE_FILES} files). Some files may not appear in search. Folder navigation will use lazy loading.`);
-                }
             } catch (error) {
-                console.error('Failed to build file cache:', error);
                 this.cachedData = null;
             } finally {
                 this.cacheBuildPromise = null;
@@ -377,7 +361,6 @@ export class FileSearchManager {
 
         if (shouldLazyLoad || (!cachedFiles && subdirs.size === 0)) {
             // Use lazy loading for better completeness
-            this.debugOutputChannel.appendLine(`Using lazy loading for directory: ${currentPath || '(root)'}`);
             return this.getDirectoryContentsFs(currentPath);
         }
 
@@ -454,7 +437,6 @@ export class FileSearchManager {
             });
 
         } catch (error) {
-            console.error('Failed to get directory contents:', error);
             return [];
         }
     }
@@ -468,19 +450,12 @@ export class FileSearchManager {
             return [];
         }
 
-        this.debugOutputChannel.appendLine('=== filterFromCache DEBUG START ===');
-        this.debugOutputChannel.appendLine(`Query: ${query}`);
-        this.debugOutputChannel.appendLine(`CurrentPath: ${currentPath}`);
-        this.debugOutputChannel.appendLine(`Total files in cache: ${this.cachedData.files.length}`);
-
         const lowerQuery = query.toLowerCase();
         const results: FileSuggestion[] = [];
         const seenDirs = new Set<string>(); // Track unique directories for folder results
         const seenFilePaths = new Set<string>(); // Track unique file paths to avoid duplicates
 
         // Filter files that match the query
-        this.debugOutputChannel.appendLine('\n--- Loop 1: Adding Files ---');
-        let fileCount = 0;
         for (const file of this.cachedData.files) {
             // If currentPath is specified, only search within that path
             if (currentPath) {
@@ -497,10 +472,6 @@ export class FileSearchManager {
                 if (!seenFilePaths.has(file.relativePath)) {
                     seenFilePaths.add(file.relativePath);
                     results.push(file);
-                    fileCount++;
-                    this.debugOutputChannel.appendLine(`✓ Added FILE: name="${file.name}" path="${file.relativePath}" type="${file.type}"`);
-                } else {
-                    this.debugOutputChannel.appendLine(`✗ Skipped duplicate FILE: path="${file.relativePath}"`);
                 }
                 matched = true;
             }
@@ -513,10 +484,6 @@ export class FileSearchManager {
                         if (!seenFilePaths.has(file.relativePath)) {
                             seenFilePaths.add(file.relativePath);
                             results.push(file);
-                            fileCount++;
-                            this.debugOutputChannel.appendLine(`✓ Added FILE (path match): name="${file.name}" path="${file.relativePath}" type="${file.type}"`);
-                        } else {
-                            this.debugOutputChannel.appendLine(`✗ Skipped duplicate FILE (path match): path="${file.relativePath}"`);
                         }
                         break;
                     }
@@ -528,12 +495,9 @@ export class FileSearchManager {
                 break;
             }
         }
-        this.debugOutputChannel.appendLine(`Loop 1 complete: ${fileCount} files added`);
 
         // Add matching folders (deduplicated)
         // Only add actual folders, not files
-        this.debugOutputChannel.appendLine('\n--- Loop 2: Adding Folders ---');
-        let folderCount = 0;
         if (this.cachedData) {
             for (const file of this.cachedData.files) {
                 if (results.length >= this.MAX_RESULTS) {
@@ -568,22 +532,11 @@ export class FileSearchManager {
                                 icon: '📁'
                             };
                             results.push(folderSuggestion);
-                            folderCount++;
-                            this.debugOutputChannel.appendLine(`✓ Added FOLDER: name="${dirPart}" path="${dirPathSoFar}" type="folder"`);
-                        } else if (dirPart.toLowerCase().includes(lowerQuery)) {
-                            this.debugOutputChannel.appendLine(`✗ Skipped duplicate FOLDER: path="${dirPathSoFar}"`);
                         }
                     }
                 }
             }
         }
-        this.debugOutputChannel.appendLine(`Loop 2 complete: ${folderCount} folders added`);
-
-        this.debugOutputChannel.appendLine('\n--- Results Before Sorting ---');
-        this.debugOutputChannel.appendLine(`Total results: ${results.length}`);
-        results.forEach((item, index) => {
-            this.debugOutputChannel.appendLine(`  [${index}] name="${item.name}" path="${item.relativePath}" type="${item.type}"`);
-        });
 
         // Sort: exact match first, then folders, then alphabetical
         const sorted = results.sort((a, b) => {
@@ -597,14 +550,6 @@ export class FileSearchManager {
             }
             return a.name.localeCompare(b.name);
         }).slice(0, this.MAX_RESULTS);
-
-        this.debugOutputChannel.appendLine('\n--- Results After Sorting ---');
-        this.debugOutputChannel.appendLine(`Total results (after limit): ${sorted.length}`);
-        sorted.forEach((item, index) => {
-            this.debugOutputChannel.appendLine(`  [${index}] name="${item.name}" path="${item.relativePath}" type="${item.type}"`);
-        });
-        this.debugOutputChannel.appendLine('=== filterFromCache DEBUG END ===\n');
-        this.debugOutputChannel.show(); // Automatically show the output panel
 
         return sorted;
     }
@@ -629,7 +574,6 @@ export class FileSearchManager {
                 items
             };
         } catch (error) {
-            console.error('Failed to get folder contents:', error);
             return { path: folderPath, items: [] };
         }
     }
@@ -707,7 +651,6 @@ export class FileSearchManager {
             this.fileSystemWatcher.dispose();
             this.fileSystemWatcher = null;
         }
-        this.debugOutputChannel.dispose();
         this.cachedData = null;
     }
 

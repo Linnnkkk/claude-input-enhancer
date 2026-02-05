@@ -152,7 +152,6 @@ function discoverCustomSkills(claudePath: string, workspaceRoots: string[] = [])
                     }
                 } catch (error) {
                     // Skip skills that can't be read
-                    console.warn(`Failed to read skill: ${entry.name}`, error);
                 }
             }
         }
@@ -170,7 +169,6 @@ function discoverCustomSkills(claudePath: string, workspaceRoots: string[] = [])
             // Get workspace folder name for category
             const workspaceName = path.basename(workspaceRoot);
             scanSkillsDirectory(projectSkillsDir, `Project: ${workspaceName}`);
-            console.log(`Scanned project skills: ${projectSkillsDir}`);
         }
     }
 
@@ -235,7 +233,6 @@ function discoverPluginCommands(claudePath: string): SlashCommand[] {
                     const pluginJson = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'));
                     pluginName = pluginJson.name || '';
                 } catch (e) {
-                    console.warn(`Failed to read plugin.json: ${pluginJsonPath}`);
                 }
             }
 
@@ -270,7 +267,6 @@ function discoverPluginCommands(claudePath: string): SlashCommand[] {
                                     });
                                 }
                             } catch (error) {
-                                console.warn(`Failed to read skill: ${skillMdPath}`, error);
                             }
                         }
                     }
@@ -299,13 +295,11 @@ function discoverPluginCommands(claudePath: string): SlashCommand[] {
                                 source: 'command'
                             });
                         } catch (error) {
-                            console.warn(`Failed to read command: ${commandMdPath}`, error);
                         }
                     }
                 }
             }
         } catch (error) {
-            console.warn(`Failed to read plugin: ${pluginRoot}`, error);
         }
     }
 
@@ -394,14 +388,10 @@ export class SlashCommandManager {
             // Watch for changes in plugins directory
             fs.watch(pluginsDir, { recursive: true }, (eventType, filename) => {
                 if (filename && (filename.endsWith('.md') || filename.includes('commands'))) {
-                    console.log(`Plugin change detected: ${filename}, refreshing commands...`);
                     this.refreshCommands();
                 }
             });
-
-            console.log('File system watcher set up for plugin commands');
         } catch (error) {
-            console.warn('Failed to set up file system watcher:', error);
             // Non-fatal: commands will still refresh via cache duration
         }
     }
@@ -413,9 +403,7 @@ export class SlashCommandManager {
         try {
             this.commands = getAllCommands(this.workspaceRoots);
             this.lastUpdateTime = Date.now();
-            console.log(`Commands refreshed: ${this.commands.length} total commands`);
         } catch (error) {
-            console.error('Failed to refresh commands:', error);
             // Keep existing commands if refresh fails
         }
     }
